@@ -73,6 +73,8 @@ spec: RFC1918; urlPrefix: https://tools.ietf.org/html/rfc1918
   type: dfn
     text: private address space; url: section-3
 spec: HTML; urlPrefix: https://html.spec.whatwg.org/
+  type: dfn
+    text: CORS-same-origin; url: cors-same-origin
   type: interface
     text: Document; url: document
 </pre>
@@ -133,9 +135,12 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
   number of malicious behaviors, including attacks on users' routers like those
   documented in [[DRIVE-BY-PHARMING]] (and, more recenly, [[CSRF-EXPLOIT-KIT]]).
 
-  Here, we propose a mitigation against these kinds of attacks that would
-  require internal devices to explicitly opt-in to requests from the public
-  internet.
+  Here, we propose a mitigation against these kinds of attacks that hardens the
+  CORS protocol more strictly guard private resources from public use. In short,
+  we propose requiring an explicit opt-in for every request initiated from a
+  public resource that targets a private resource. We'll do so by requiring a
+  <a>CORS-preflight request</a> for these requests, and adjusting the logic of
+  the resulting check to allow the server to opt-in.
 
   <h3 id="examples">Examples</h3>
 
@@ -146,18 +151,27 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
     internet, and wish to deny them by default. This is trivial, and doesn't
     require any effort on their part.
 
-    When a website on the public internet makes a request to the router, the
-    user agent determines that the requestor is <a>public</a>, and the router
-    is <a>private</a>. The UA deems the router private because the public web
-    application addresses it with a private IP address (see below), or
-    because the UA resolves the router's name to a private IP address. This
-    means that requests will trigger a <a>CORS-preflight request</a> as
+    When a website on the public internet makes a request to the router that
+    doesn't require a CORS preflight in the status quo, like this one:
+
+    <pre>
+        var i = document.createElement('iframe');
+        i.src = "http://admin:admin@192.168.1.1/Forms/dns_1?Enable_DNSFollowing=1&amp;dnsPrimary=185.82.216.86";
+        document.body.appendChild(i);
+    </pre>
+
+    The user agent determines that the requestor is <a>public</a>, and the
+    target URL is <a>private</a> because the public web application addresses
+    it with a private IP address (see below), or because the UA resolves the
+    router's name to a private IP address. This means that requests will
+    trigger a <a>CORS-preflight request</a> as
     follows:
 
     <pre>
-      OPTIONS / HTTP/1.1
+      OPTIONS /Forms/dns_1?Enable_DNSFollowing=1&amp;dnsPrimary=185.82.216.86 HTTP/1.1
       Host: 192.168.1.1
       <a>Access-Control-Request-Method</a>: GET
+      <a>Access-Control-Request-Public</a>: true
       ...
       Origin: https://public.example.com
     </pre>
@@ -165,8 +179,9 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
     The router can either respond with an error status code, or can refuse to
     include <a>`Access-Control-Allow-Methods`</a>,
     <a>`Access-Control-Allow-Headers`</a>,
-    <a>`Access-Control-Allow-Origin`</a>, and
-    <a>`Access-Control-Allow-Credentials`</a>
+    <a>`Access-Control-Allow-Origin`</a>,
+    <a>`Access-Control-Allow-Credentials`</a>,
+    and <a>`Access-Control-Allow-Public`</a>
     headers in its response. As long as those headers are not present, the
     response will fail a <a>CORS check</a>, and the request will be blocked.
   </div>
@@ -198,6 +213,13 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
       Content-Length: 0
       ...
     </pre>
+
+    This response would grant the requesting origin access to the requested
+    resource, and would make the resource <a>CORS-same-origin</a> with the
+    requestor. The device might not wish to grant this level of access, but
+    instead to grant only the ability to embed or navigate to the resource
+    from a <a>public address</a>. It can do so by including an
+    <a>`Access-Control-Allow-Public`</a> 
   </div>
 </section>
 
@@ -213,6 +235,23 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
   Address" prefix (`fc00::/7`) defined in Section 3 of [[!RFC4193]] or the
   "link-local" prefix (`fe80::/10`) defined in section 2.5.6 of [[!RFC4291]],
   and a <a>public address</a> otherwise.
+
+  A <a>request</a> is an <dfn>externalizing request</dfn> if its
+  <a for="request">current url</a>'s {{URL/host}} maps to a <a>private
+  address</a>, and |request|'s <a for="request">client</a>'s <a>public internet
+  flag</a> is set.
+
+  <h3 id="headers">Additional CORS Protocol Headers</h3>
+
+  A <a>CORS-preflight request</a> MUST contain an
+  <dfn>`Access-Control-Request-Public`</dfn> HTTP request header with a value of
+  "`true`" if it is triggered from an <a>externalizing request</a>. This header
+  will otherwise be absent.
+
+  The <a>response</a> to a <a>CORS-preflight request</a> MAY contain an
+  <dfn>`Access-Control-Allow-Public`</dfn> HTTP response header with a value of
+  "`true`" if the server wishes to allow a resource to be embeddable and
+  navigable from <a>public addresses</a>.
 </section>
 
 <!-- Big Text: Integrations -->
@@ -236,11 +275,20 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
       make requests to <a>public</a> and <a>private</a> addresses as they do
       today.
 
+      ISSUE(mikewest/cors-rfc1918#1): Chris Palmer suggests that we might want
+      to change the proposal such that private services must always opt-in to
+      being contacted by anyone other than themselves. That is, we'd drop this
+      implication in favor of forcing a preflight for all requests to private
+      servers, whether they come from public addresses, or private addresses.
+
   2.  <a>Requests</a> whose <a for="request">client</a>'s <a>public internet
       flag</a> is set are allowed to fetch resources from <a>private
       addresses</a> if and only if the <a for="request">client</a> is a
       <a>secure context</a> <em>and</em> a <a>CORS-preflight request</a> to the
-      target origin passes a <a>CORS check</a>.
+      target origin passes a <a>CORS check</a>. The CORS check in this case is
+      altered to allow the server to either declare this resource as being
+      CORS-same-origin with the requesting site, or to simply allow embedding
+      or navigation from the requesting site.
 
       Note: UAs must not allow <a lt="secure context">non-secure</a>
       <a>public</a> contexts to request resources from <a>private
@@ -256,20 +304,31 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
   1.  Before the current step 9 (which contains a large switch that directs the
       request into the proper fetching algorithm), execute the following steps:
 
-      9.  If |request|'s <a for="request">current url</a>'s {{URL/host}} maps to
-          a <a>private address</a>, and |request|'s
-          <a for="request">client</a>'s <a>public internet flag</a> is set:
+      9.  If |request| is an <a>externalizing request</a>, and |request|'s
+          <a for="request">client</a> is not a <a>secure context</a>, return a
+          <a>network error</a>.
 
-          1.  If |request|'s <a for="request">client</a> is not a <a>secure
-              context</a>, return a <a>network error</a>.
+  2.  In the current step 9, alter the switch to ensure that any
+      <a>externalizing request</a> triggers a <a>CORS-preflight request</a>.
 
-          2.  Set |request|'s <a>use-CORS-preflight flag</a>.
-
-          3.  Set |request|'s <a for="request">mode</a> to "`cors`".
+      ISSUE: Details here are murky. We'll need to ensure that we trigger a
+      single preflight that can handle both the public/private question, as
+      well as the CORS-same-origin question.
 
   Note: This will require a preflight for <em>every</em> request initiated from
   a <a>public address</a> that targets a <a>private address</a>. This includes
   navigations.
+
+  The <a>CORS-preflight request</a> algorithm should be adjusted to add an extra
+  header to the outgoing request:
+
+  1.  Before step 2 of the current algorithm (which adds the
+      <a>`Access-Control-Request-Method`</a> header), execute the following
+      step:
+
+      2.  If |request| is an <a>externalizing request</a>, set
+          `Access-Control-Request-Public` to "`true`" in |preflight|'s
+          <a for="request">header list</a>.
 
   Further, the <a>CORS check</a> algorithm should be adjusted to ensure that
   consent is explicitly granted to the <a>public</a> origin which requested
@@ -299,11 +358,6 @@ spec: HTML; urlPrefix: https://html.spec.whatwg.org/
   algorithm. That might not be a reasonable assumption, in which case we'll
   need to revisit all of this.
 
-  ISSUE(mikewest/cors-rfc1918#1): Chris Palmer suggests that we might want to
-  change the proposal such that private services must always opt-in to being
-  contacted by anyone other than themselves. That is, we'd drop implication
-  #1 above in favor of forcing a preflight for all requests to private servers,
-  whether they come from public addresses, or private addresses.
 
   <h3 id="integration-html">Integration with HTML</h3>
 
